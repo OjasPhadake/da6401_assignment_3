@@ -333,6 +333,9 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'model_config':         model_config,
+        # Save vocab objects so Transformer() can restore infer() capability
+        'src_vocab':            getattr(model, 'src_vocab', None),
+        'tgt_vocab':            getattr(model, 'tgt_vocab', None),
     }, path)
 
 
