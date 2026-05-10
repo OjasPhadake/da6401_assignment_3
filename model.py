@@ -570,31 +570,43 @@ class Transformer(nn.Module):
 
     def _ensure_vocab(self) -> None:
         """
-        Lazily loads src/tgt vocabularies if they are not already set.
+        Lazily loads src/tgt vocabularies if not already set.
 
-        Priority:
-          1. Already set on self (nothing to do).
-          2. Load from a checkpoint file on disk (best_checkpoint.pt or checkpoint.pt).
-          3. Rebuild by downloading Multi30k and running spacy tokenization.
+        Priority (all offline — no network required):
+          1. Already set on self.
+          2. vocab.pkl  (small file saved alongside checkpoint during training).
+          3. Any *.pt checkpoint on disk that contains 'src_vocab' / 'tgt_vocab'.
         """
         if self.src_vocab is not None and self.tgt_vocab is not None:
             return
 
-        # 1. Try to recover from any checkpoint present on disk
+        import pickle
+
+        # 1. Dedicated vocab file written by save_checkpoint()
+        for vocab_file in ("vocab.pkl",):
+            if os.path.isfile(vocab_file):
+                with open(vocab_file, "rb") as f:
+                    data = pickle.load(f)
+                self.src_vocab = data.get("src_vocab")
+                self.tgt_vocab = data.get("tgt_vocab")
+                if self.src_vocab is not None and self.tgt_vocab is not None:
+                    return
+
+        # 2. Any checkpoint that has vocab embedded
         for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
             if os.path.isfile(candidate):
-                ckpt = torch.load(candidate, map_location='cpu')
-                src_v = ckpt.get('src_vocab')
-                tgt_v = ckpt.get('tgt_vocab')
+                ckpt = torch.load(candidate, map_location="cpu")
+                src_v = ckpt.get("src_vocab")
+                tgt_v = ckpt.get("tgt_vocab")
                 if src_v is not None and tgt_v is not None:
                     self.src_vocab = src_v
                     self.tgt_vocab = tgt_v
                     return
 
-        # 2. Rebuild vocabulary from Multi30k training data
-        from dataset import Multi30kDataset
-        ds = Multi30kDataset(split='train')
-        self.src_vocab, self.tgt_vocab = ds.build_vocab(min_freq=2)
+        raise RuntimeError(
+            "Could not find vocabulary. "
+            "Make sure vocab.pkl (saved by save_checkpoint) is included in your submission."
+        )
 
     def infer(self, src_sentence: str) -> str:
         """

@@ -327,16 +327,24 @@ def save_checkpoint(
         'pad_idx':   model.pad_idx,
     }
 
+    src_vocab = getattr(model, 'src_vocab', None)
+    tgt_vocab = getattr(model, 'tgt_vocab', None)
+
     torch.save({
         'epoch':                epoch,
         'model_state_dict':     model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'model_config':         model_config,
-        # Save vocab objects so Transformer() can restore infer() capability
-        'src_vocab':            getattr(model, 'src_vocab', None),
-        'tgt_vocab':            getattr(model, 'tgt_vocab', None),
+        'src_vocab':            src_vocab,
+        'tgt_vocab':            tgt_vocab,
     }, path)
+
+    # Also write a standalone vocab.pkl so infer() can find the vocabulary
+    # without having to load the full (potentially large) checkpoint.
+    import pickle
+    with open("vocab.pkl", "wb") as f:
+        pickle.dump({"src_vocab": src_vocab, "tgt_vocab": tgt_vocab}, f)
 
 
 def load_checkpoint(
