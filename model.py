@@ -568,11 +568,37 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
+    def _ensure_vocab(self) -> None:
+        """
+        Lazily loads src/tgt vocabularies if they are not already set.
+
+        Priority:
+          1. Already set on self (nothing to do).
+          2. Load from a checkpoint file on disk (best_checkpoint.pt or checkpoint.pt).
+          3. Rebuild by downloading Multi30k and running spacy tokenization.
+        """
+        if self.src_vocab is not None and self.tgt_vocab is not None:
+            return
+
+        # 1. Try to recover from any checkpoint present on disk
+        for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
+            if os.path.isfile(candidate):
+                ckpt = torch.load(candidate, map_location='cpu')
+                src_v = ckpt.get('src_vocab')
+                tgt_v = ckpt.get('tgt_vocab')
+                if src_v is not None and tgt_v is not None:
+                    self.src_vocab = src_v
+                    self.tgt_vocab = tgt_v
+                    return
+
+        # 2. Rebuild vocabulary from Multi30k training data
+        from dataset import Multi30kDataset
+        ds = Multi30kDataset(split='train')
+        self.src_vocab, self.tgt_vocab = ds.build_vocab(min_freq=2)
+
     def infer(self, src_sentence: str) -> str:
         """
         Translates a German sentence to English using greedy autoregressive decoding.
-
-        Requires self.src_vocab and self.tgt_vocab to be set (done during training setup).
 
         Args:
             src_sentence: The raw German text.
@@ -583,13 +609,14 @@ class Transformer(nn.Module):
         import spacy
         from train import greedy_decode
 
-        assert self.src_vocab is not None and self.tgt_vocab is not None, \
-            "Set model.src_vocab and model.tgt_vocab before calling infer()"
+        self._ensure_vocab()
 
         spacy_de = spacy.load("de_core_news_sm")
+        pad_idx = self.pad_idx
         sos_idx = self.src_vocab.stoi.get('<sos>', 2)
         eos_idx = self.src_vocab.stoi.get('<eos>', 3)
-        pad_idx = self.pad_idx
+        tgt_sos = self.tgt_vocab.stoi.get('<sos>', 2)
+        tgt_eos = self.tgt_vocab.stoi.get('<eos>', 3)
 
         tokens = [tok.text.lower() for tok in spacy_de.tokenizer(src_sentence)]
         src_ids = [sos_idx] + self.src_vocab.lookup_indices(tokens) + [eos_idx]
@@ -599,8 +626,6 @@ class Transformer(nn.Module):
         src_mask = make_src_mask(src, pad_idx)
 
         self.eval()
-        tgt_eos = self.tgt_vocab.stoi.get('<eos>', 3)
-        tgt_sos = self.tgt_vocab.stoi.get('<sos>', 2)
         out = greedy_decode(self, src, src_mask, max_len=100,
                             start_symbol=tgt_sos, end_symbol=tgt_eos, device=str(device))
 
