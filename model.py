@@ -630,14 +630,8 @@ class Transformer(nn.Module):
         import spacy
         from train import greedy_decode
 
-        try:
-            spacy_de = spacy.load("de_core_news_sm")
-        except:
-            from spacy.cli import download
-            download("de_core_news_sm")
-            spacy_de = spacy.load("de_core_news_sm")
-
-        # spacy_de = spacy.load("de_core_news_sm")
+        # spacy.blank("de") uses built-in rules only — no model download, works offline
+        spacy_de = spacy.blank("de")
         pad_idx = self.pad_idx
         sos_idx = self.src_vocab.stoi.get('<sos>', 2)
         eos_idx = self.src_vocab.stoi.get('<eos>', 3)

@@ -72,9 +72,9 @@ class Multi30kDataset(Dataset):
         # HuggingFace dataset — fields: 'de', 'en'
         self.data = load_dataset("bentrevett/multi30k", split=split)
 
-        # Spacy tokenizers
-        self.spacy_de = spacy.load("de_core_news_sm")
-        self.spacy_en = spacy.load("en_core_web_sm")
+        # spacy.blank() uses built-in tokenization rules — no model download needed
+        self.spacy_de = spacy.blank("de")
+        self.spacy_en = spacy.blank("en")
 
         self.src_vocab  = src_vocab
         self.tgt_vocab  = tgt_vocab
