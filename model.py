@@ -684,7 +684,7 @@ class Transformer(nn.Module):
             The fully translated English string, detokenized and clean.
         """
         import spacy
-        from train import greedy_decode
+        from train import beam_search_decode
 
         self._ensure_vocab()   # load vocab from vocab.pkl / checkpoint if not already set
 
@@ -704,8 +704,8 @@ class Transformer(nn.Module):
         src_mask = make_src_mask(src, pad_idx)
 
         self.eval()
-        out = greedy_decode(self, src, src_mask, max_len=50,
-                            start_symbol=tgt_sos, end_symbol=tgt_eos, device=str(device))
+        out = beam_search_decode(self, src, src_mask, max_len=50,
+                                 start_symbol=tgt_sos, end_symbol=tgt_eos, device=str(device))
 
         out_tokens = out[0].tolist()
         words = []

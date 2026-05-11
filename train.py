@@ -201,6 +201,84 @@ def greedy_decode(
 
 
 # ══════════════════════════════════════════════════════════════════════
+#   BEAM SEARCH DECODING
+# ══════════════════════════════════════════════════════════════════════
+
+def beam_search_decode(
+    model,
+    src: torch.Tensor,
+    src_mask: torch.Tensor,
+    max_len: int,
+    start_symbol: int,
+    end_symbol: int,
+    beam_size: int = 4,
+    length_penalty: float = 0.6,
+    device: str = "cpu",
+) -> torch.Tensor:
+    """
+    Beam search decoding for a single source sentence.
+
+    Args:
+        model        : Trained Transformer.
+        src          : Source token indices, shape [1, src_len].
+        src_mask     : shape [1, 1, 1, src_len].
+        max_len      : Maximum tokens to generate.
+        start_symbol : <sos> index.
+        end_symbol   : <eos> index.
+        beam_size    : Number of beams (default 4).
+        length_penalty: Exponent for Google-NMT length normalization (default 0.6).
+        device       : 'cpu' or 'cuda'.
+
+    Returns:
+        Best decoded sequence, shape [1, out_len].
+    """
+    model.eval()
+    pad_idx = model.pad_idx
+
+    with torch.no_grad():
+        memory = model.encode(src, src_mask)   # [1, src_len, d_model]
+
+        # beams: list of (cumulative_log_prob, token_list)
+        beams = [(0.0, [start_symbol])]
+        completed = []
+
+        for _ in range(max_len - 1):
+            if not beams:
+                break
+            candidates = []
+            for score, tokens in beams:
+                ys = torch.tensor([tokens], dtype=torch.long, device=device)
+                tgt_mask = make_tgt_mask(ys, pad_idx)
+                logits = model.decode(memory, src_mask, ys, tgt_mask)
+                log_probs = F.log_softmax(logits[0, -1], dim=-1)   # [vocab]
+
+                topk_lp, topk_ids = log_probs.topk(beam_size)
+                for lp, tid in zip(topk_lp.tolist(), topk_ids.tolist()):
+                    new_score = score + lp
+                    new_tokens = tokens + [tid]
+                    if tid == end_symbol:
+                        completed.append((new_score, new_tokens))
+                    else:
+                        candidates.append((new_score, new_tokens))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            beams = candidates[:beam_size]
+
+        completed.extend(beams)
+
+        if not completed:
+            return torch.tensor([[start_symbol]], dtype=torch.long, device=device)
+
+        def _norm(item):
+            score, tokens = item
+            lp = ((5 + len(tokens)) / 6) ** length_penalty
+            return score / lp
+
+        _, best_tokens = max(completed, key=_norm)
+        return torch.tensor([best_tokens], dtype=torch.long, device=device)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #   CORPUS BLEU (pure numpy — no external BLEU library needed)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -313,8 +391,8 @@ def evaluate_bleu(
                 src_i    = src[i].unsqueeze(0)                    # [1, src_len]
                 src_mask = make_src_mask(src_i, pad_idx)
 
-                out = greedy_decode(model, src_i, src_mask, max_len,
-                                    start_symbol=sos_idx, end_symbol=eos_idx, device=device)
+                out = beam_search_decode(model, src_i, src_mask, max_len,
+                                         start_symbol=sos_idx, end_symbol=eos_idx, device=device)
                 out_ids = out[0].tolist()
 
                 pred_words = []
