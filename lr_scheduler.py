@@ -6,7 +6,7 @@ Reference: "Attention Is All You Need" (Vaswani et al., 2017)
 Formula:
     lrate = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
 """
-
+from typing import List
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import LRScheduler
@@ -55,7 +55,7 @@ class NoamScheduler(LRScheduler):
         return (self.d_model ** -0.5) * min(step ** -0.5, step * self.warmup_steps ** -1.5)
 
     # ------------------------------------------------------------------
-    def get_lr(self) -> list[float]:
+    def get_lr(self) -> List[float]:
         """
         Compute learning rates for every param group.
 
@@ -76,7 +76,7 @@ def get_lr_history(
     d_model: int,
     warmup_steps: int,
     total_steps: int,
-) -> list[float]:
+) -> List[float]:
     """
     Simulate the LR trajectory of NoamScheduler for `total_steps` steps.
 
