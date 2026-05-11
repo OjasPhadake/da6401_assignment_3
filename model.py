@@ -71,6 +71,7 @@ def scaled_dot_product_attention(
     K: torch.Tensor,
     V: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
+    use_scale: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute Scaled Dot-Product Attention.
@@ -91,7 +92,9 @@ def scaled_dot_product_attention(
         attn_w : Attention weights, shape (..., seq_q, seq_k)
     """
     d_k = Q.size(-1)
-    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1))
+    if use_scale:
+        scores = scores / math.sqrt(d_k)
 
     if mask is not None:
         scores = scores.masked_fill(mask, float('-inf'))
@@ -172,13 +175,15 @@ class MultiHeadAttention(nn.Module):
         dropout   (float): Dropout probability applied to attention weights.
     """
 
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
         self.d_model   = d_model
         self.num_heads = num_heads
         self.d_k       = d_model // num_heads
+        self.use_scale = use_scale
+        self.last_attn_weights: Optional[torch.Tensor] = None  # saved after each forward for visualization
 
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
@@ -215,7 +220,8 @@ class MultiHeadAttention(nn.Module):
         K = project_and_split(self.W_k, key)
         V = project_and_split(self.W_v, value)
 
-        attn_out, _ = scaled_dot_product_attention(Q, K, V, mask)
+        attn_out, attn_w = scaled_dot_product_attention(Q, K, V, mask, use_scale=self.use_scale)
+        self.last_attn_weights = attn_w.detach()  # [batch, heads, seq_q, seq_k]
 
         # Merge heads: [batch, seq_q, d_model]
         attn_out = attn_out.transpose(1, 2).contiguous().view(batch, -1, self.d_model)
@@ -265,6 +271,39 @@ class PositionalEncoding(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#   LEARNED POSITIONAL ENCODING  (experiment 2.4 — replaces sinusoidal)
+# ══════════════════════════════════════════════════════════════════════
+
+class LearnedPositionalEncoding(nn.Module):
+    """
+    Learned positional embeddings via nn.Embedding.
+    Trainable alternative to sinusoidal PE for ablation study.
+
+    Args:
+        d_model (int)  : Embedding dimensionality.
+        dropout (float): Dropout applied after adding encodings.
+        max_len (int)  : Maximum sequence length (default 5000).
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.pe = nn.Embedding(max_len, d_model)
+        nn.init.normal_(self.pe.weight, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x : shape [batch, seq_len, d_model]
+        Returns:
+            shape [batch, seq_len, d_model]
+        """
+        seq_len = x.size(1)
+        positions = torch.arange(seq_len, device=x.device)
+        return self.dropout(x + self.pe(positions))
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  FEED-FORWARD NETWORK
 # ══════════════════════════════════════════════════════════════════════
 
@@ -308,9 +347,9 @@ class EncoderLayer(nn.Module):
         dropout   (float): Dropout probability.
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale=use_scale)
         self.ffn       = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.norm1     = nn.LayerNorm(d_model)
         self.norm2     = nn.LayerNorm(d_model)
@@ -352,10 +391,10 @@ class DecoderLayer(nn.Module):
         dropout   (float): Dropout probability.
     """
 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1, use_scale: bool = True) -> None:
         super().__init__()
-        self.self_attn  = MultiHeadAttention(d_model, num_heads, dropout)
-        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.self_attn  = MultiHeadAttention(d_model, num_heads, dropout, use_scale=use_scale)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, use_scale=use_scale)
         self.ffn        = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.norm1      = nn.LayerNorm(d_model)
         self.norm2      = nn.LayerNorm(d_model)
@@ -479,6 +518,8 @@ class Transformer(nn.Module):
         dropout:   float = 0.1,
         checkpoint_path: Optional[str] = None,
         pad_idx:   int   = 1,
+        use_scale: bool  = True,          # ablation 2.2: set False to remove 1/sqrt(d_k)
+        pe_type:   str   = 'sinusoidal',  # ablation 2.4: 'sinusoidal' | 'learned'
     ) -> None:
         super().__init__()
 
@@ -535,11 +576,12 @@ class Transformer(nn.Module):
 
         self.src_embed = nn.Embedding(src_vocab_size, d_model, padding_idx=pad_idx)
         self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model, padding_idx=pad_idx)
-        self.src_pe    = PositionalEncoding(d_model, dropout)
-        self.tgt_pe    = PositionalEncoding(d_model, dropout)
+        PE = LearnedPositionalEncoding if pe_type == 'learned' else PositionalEncoding
+        self.src_pe    = PE(d_model, dropout)
+        self.tgt_pe    = PE(d_model, dropout)
 
-        enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout)
-        dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout)
+        enc_layer = EncoderLayer(d_model, num_heads, d_ff, dropout, use_scale=use_scale)
+        dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout, use_scale=use_scale)
         self.encoder = Encoder(enc_layer, N)
         self.decoder = Decoder(dec_layer, N)
         self.fc_out  = nn.Linear(d_model, tgt_vocab_size)
@@ -716,3 +758,19 @@ class Transformer(nn.Module):
                 words.append(self.tgt_vocab.lookup_token(t))
 
         return " ".join(words)
+
+    def get_encoder_attention(self, src: torch.Tensor) -> torch.Tensor:
+        """
+        Run the encoder and return self-attention weights from the last encoder layer.
+
+        Args:
+            src : Token indices, shape [1, src_len]
+
+        Returns:
+            attn : shape [1, num_heads, src_len, src_len]
+        """
+        src_mask = make_src_mask(src, self.pad_idx)
+        self.eval()
+        with torch.no_grad():
+            self.encode(src, src_mask)
+        return self.encoder.layers[-1].self_attn.last_attn_weights
