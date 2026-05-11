@@ -30,6 +30,37 @@ import torch.nn.functional as F
 
 
 # ══════════════════════════════════════════════════════════════════════
+#   LIGHTWEIGHT VOCAB  (no dependency on dataset.py)
+# ══════════════════════════════════════════════════════════════════════
+
+class _Vocab:
+    """Plain-Python vocabulary that can be pickled without importing dataset.py."""
+    def __init__(self, stoi: dict, itos: list):
+        self.stoi = stoi
+        self.itos = itos
+    def __len__(self):
+        return len(self.itos)
+    def lookup_token(self, idx: int) -> str:
+        return self.itos[idx]
+    def lookup_indices(self, tokens: list) -> list:
+        unk = self.stoi.get('<unk>', 0)
+        return [self.stoi.get(t, unk) for t in tokens]
+
+
+def _vocab_from_raw(raw) -> Optional['_Vocab']:
+    """Convert a raw {'stoi': ..., 'itos': ...} dict (or existing vocab) to _Vocab."""
+    if raw is None:
+        return None
+    if isinstance(raw, _Vocab):
+        return raw
+    if isinstance(raw, dict) and 'stoi' in raw and 'itos' in raw:
+        return _Vocab(raw['stoi'], raw['itos'])
+    if hasattr(raw, 'stoi') and hasattr(raw, 'itos'):
+        return _Vocab(raw.stoi, raw.itos)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════
 #   STANDALONE ATTENTION FUNCTION
 #    Exposed at module level so the autograder can import and test it
 #    independently of MultiHeadAttention.
@@ -504,8 +535,9 @@ class Transformer(nn.Module):
 
         if _ckpt_state is not None:
             self.load_state_dict(_ckpt_state['model_state_dict'])
-            self.src_vocab = _ckpt_state.get('src_vocab', None)
-            self.tgt_vocab = _ckpt_state.get('tgt_vocab', None)
+            # Convert raw dicts → _Vocab so infer() can use .stoi / .itos immediately
+            self.src_vocab = _vocab_from_raw(_ckpt_state.get('src_vocab'))
+            self.tgt_vocab = _vocab_from_raw(_ckpt_state.get('tgt_vocab'))
 
     def _init_weights(self):
         for p in self.parameters():
@@ -582,15 +614,21 @@ class Transformer(nn.Module):
         Lazily loads src/tgt vocabularies if not already set.
 
         Priority (all offline — no network required):
-          1. Already set on self.
-          2. vocab.pkl  (small file saved alongside checkpoint during training).
+          1. Already a proper _Vocab object on self.
+          2. vocab.pkl  — plain-dict format written by save_checkpoint().
           3. Any *.pt checkpoint on disk that contains 'src_vocab' / 'tgt_vocab'.
         """
-        if self.src_vocab is not None and self.tgt_vocab is not None:
+        # Convert if already set but still a raw dict (e.g. from old checkpoint load)
+        if self.src_vocab is not None:
+            self.src_vocab = _vocab_from_raw(self.src_vocab)
+        if self.tgt_vocab is not None:
+            self.tgt_vocab = _vocab_from_raw(self.tgt_vocab)
+
+        if isinstance(self.src_vocab, _Vocab) and isinstance(self.tgt_vocab, _Vocab):
             return
 
         import pickle
-        
+
         # 1. Dedicated vocab file written by save_checkpoint()
         for vocab_file in ("vocab.pkl",):
             if os.path.isfile(vocab_file):
@@ -607,8 +645,8 @@ class Transformer(nn.Module):
         for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
             if os.path.isfile(candidate):
                 ckpt = torch.load(candidate, map_location="cpu")
-                src_v = ckpt.get("src_vocab")
-                tgt_v = ckpt.get("tgt_vocab")
+                src_v = _vocab_from_raw(ckpt.get("src_vocab"))
+                tgt_v = _vocab_from_raw(ckpt.get("tgt_vocab"))
                 if src_v is not None and tgt_v is not None:
                     self.src_vocab = src_v
                     self.tgt_vocab = tgt_v
