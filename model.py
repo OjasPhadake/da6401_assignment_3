@@ -17,8 +17,12 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 import math
 import copy
 import os
-import gdown
 from typing import Optional, Tuple
+
+try:
+    import gdown as _gdown
+except ImportError:
+    _gdown = None
 
 import torch
 import torch.nn as nn
@@ -455,7 +459,12 @@ class Transformer(nn.Module):
 
         if checkpoint_path is not None:
             if not os.path.isfile(checkpoint_path):
-                gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
+                if _gdown is not None:
+                    _gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
+                else:
+                    raise FileNotFoundError(
+                        f"Checkpoint not found at '{checkpoint_path}' and gdown is not installed."
+                    )
             _ckpt_state = torch.load(checkpoint_path, map_location='cpu')
             cfg = _ckpt_state.get('model_config', {})
             if src_vocab_size is None:

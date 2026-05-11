@@ -201,6 +201,75 @@ def greedy_decode(
 
 
 # ══════════════════════════════════════════════════════════════════════
+#   CORPUS BLEU (pure numpy — no external BLEU library needed)
+# ══════════════════════════════════════════════════════════════════════
+
+def _corpus_bleu(predictions: list, references: list, max_n: int = 4) -> float:
+    """
+    Corpus-level BLEU score using only numpy (no sacrebleu / nltk needed).
+
+    Args:
+        predictions : list of hypothesis strings.
+        references  : list of [ref_string, ...] (one or more refs per hypothesis).
+        max_n       : maximum n-gram order (default 4).
+
+    Returns:
+        BLEU score as float in [0, 100].
+    """
+    import numpy as np
+    from collections import Counter
+
+    clipped_counts = [0] * max_n
+    total_counts   = [0] * max_n
+    hyp_len = 0
+    ref_len = 0
+
+    for hyp, refs in zip(predictions, references):
+        hyp_tok  = hyp.split()
+        refs_tok = [r.split() for r in refs]
+
+        hyp_len += len(hyp_tok)
+        # Closest reference length (ties broken by shorter ref)
+        ref_len += min((len(r) for r in refs_tok),
+                       key=lambda l: (abs(l - len(hyp_tok)), l))
+
+        for n in range(1, max_n + 1):
+            # Hypothesis n-gram counts
+            hyp_ngrams: Counter = Counter()
+            for i in range(len(hyp_tok) - n + 1):
+                hyp_ngrams[tuple(hyp_tok[i:i + n])] += 1
+
+            # Max reference n-gram counts (clipping ceiling)
+            max_ref_ngrams: Counter = Counter()
+            for r_tok in refs_tok:
+                ref_ngrams: Counter = Counter()
+                for i in range(len(r_tok) - n + 1):
+                    ref_ngrams[tuple(r_tok[i:i + n])] += 1
+                for ng, cnt in ref_ngrams.items():
+                    max_ref_ngrams[ng] = max(max_ref_ngrams[ng], cnt)
+
+            clipped_counts[n - 1] += sum(
+                min(cnt, max_ref_ngrams[ng]) for ng, cnt in hyp_ngrams.items()
+            )
+            total_counts[n - 1] += max(sum(hyp_ngrams.values()), 0)
+
+    if hyp_len == 0:
+        return 0.0
+
+    # Brevity penalty
+    bp = np.exp(min(0.0, 1.0 - ref_len / hyp_len))
+
+    # Geometric mean of clipped precisions
+    log_avg = 0.0
+    for n in range(max_n):
+        if clipped_counts[n] == 0:
+            return 0.0
+        log_avg += np.log(clipped_counts[n] / total_counts[n])
+
+    return float(bp * np.exp(log_avg / max_n) * 100.0)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #   BLEU EVALUATION
 # ══════════════════════════════════════════════════════════════════════
 
@@ -266,33 +335,7 @@ def evaluate_bleu(
                 predictions.append(" ".join(pred_words))
                 references.append([" ".join(ref_words)])
 
-    # Corpus-level BLEU via sacrebleu (returns 0–100)
-    try:
-        import sacrebleu as sb
-        bleu = sb.corpus_bleu(predictions, list(zip(*references)))
-        return bleu.score
-    except ImportError:
-        pass
-
-    # Fallback: evaluate library
-    try:
-        import evaluate
-        metric = evaluate.load("sacrebleu")
-        for pred, refs in zip(predictions, references):
-            metric.add(prediction=pred, references=refs)
-        return metric.compute()["score"]
-    except Exception:
-        pass
-
-    # Last-resort: NLTK sentence BLEU averaged to corpus BLEU
-    from nltk.translate.bleu_score import corpus_bleu as nltk_corpus_bleu, SmoothingFunction
-    tokenized_refs  = [[r[0].split() for r in refs] for refs in references]
-    tokenized_preds = [p.split() for p in predictions]
-    score = nltk_corpus_bleu(
-        tokenized_refs, tokenized_preds,
-        smoothing_function=SmoothingFunction().method1,
-    )
-    return score * 100.0
+    return _corpus_bleu(predictions, references)
 
 
 # ══════════════════════════════════════════════════════════════════════
