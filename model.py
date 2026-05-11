@@ -630,9 +630,14 @@ class Transformer(nn.Module):
         import spacy
         from train import greedy_decode
 
-        self._ensure_vocab()
+        try:
+            spacy_de = spacy.load("de_core_news_sm")
+        except:
+            from spacy.cli import download
+            download("de_core_news_sm")
+            spacy_de = spacy.load("de_core_news_sm")
 
-        spacy_de = spacy.load("de_core_news_sm")
+        # spacy_de = spacy.load("de_core_news_sm")
         pad_idx = self.pad_idx
         sos_idx = self.src_vocab.stoi.get('<sos>', 2)
         eos_idx = self.src_vocab.stoi.get('<eos>', 3)
