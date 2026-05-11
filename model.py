@@ -630,16 +630,15 @@ class Transformer(nn.Module):
         import pickle
 
         # 1. Dedicated vocab file written by save_checkpoint()
-        for vocab_file in ("vocab.pkl",):
-            if os.path.isfile(vocab_file):
-                with open(vocab_file, "rb") as f:
-                    data = pickle.load(f)
-                src_v = data.get("src_vocab")
-                tgt_v = data.get("tgt_vocab")
-                if src_v is not None and tgt_v is not None:
-                    self.src_vocab = src_v
-                    self.tgt_vocab = tgt_v
-                    return
+        if os.path.isfile("vocab.pkl"):
+            with open("vocab.pkl", "rb") as f:
+                data = pickle.load(f)
+            src_v = _vocab_from_raw(data.get("src_vocab"))
+            tgt_v = _vocab_from_raw(data.get("tgt_vocab"))
+            if src_v is not None and tgt_v is not None:
+                self.src_vocab = src_v
+                self.tgt_vocab = tgt_v
+                return
 
         # 2. Any checkpoint that has vocab embedded
         for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
