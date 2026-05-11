@@ -370,8 +370,14 @@ def save_checkpoint(
         'pad_idx':   model.pad_idx,
     }
 
-    src_vocab = getattr(model, 'src_vocab', None)
-    tgt_vocab = getattr(model, 'tgt_vocab', None)
+    def _vocab_to_raw(vocab):
+        """Serialize as plain dicts so pickle never needs to import dataset.Vocab."""
+        if vocab is None:
+            return None
+        return {"stoi": vocab.stoi, "itos": vocab.itos}
+
+    src_vocab_raw = _vocab_to_raw(getattr(model, 'src_vocab', None))
+    tgt_vocab_raw = _vocab_to_raw(getattr(model, 'tgt_vocab', None))
 
     torch.save({
         'epoch':                epoch,
@@ -379,15 +385,14 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'model_config':         model_config,
-        'src_vocab':            src_vocab,
-        'tgt_vocab':            tgt_vocab,
+        'src_vocab':            src_vocab_raw,
+        'tgt_vocab':            tgt_vocab_raw,
     }, path)
 
-    # Also write a standalone vocab.pkl so infer() can find the vocabulary
-    # without having to load the full (potentially large) checkpoint.
+    # Standalone vocab.pkl — plain dicts only, no custom class → no dataset import on load
     import pickle
     with open("vocab.pkl", "wb") as f:
-        pickle.dump({"src_vocab": src_vocab, "tgt_vocab": tgt_vocab}, f)
+        pickle.dump({"src_vocab": src_vocab_raw, "tgt_vocab": tgt_vocab_raw}, f)
 
 
 def load_checkpoint(
