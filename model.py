@@ -513,7 +513,7 @@ class Transformer(nn.Module):
                     raise FileNotFoundError(
                         f"Checkpoint not found at '{checkpoint_path}'."
                     )
-            _ckpt_state = torch.load(checkpoint_path, map_location='cpu')
+            _ckpt_state = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             cfg = _ckpt_state.get('model_config', {})
             if src_vocab_size is None:
                 src_vocab_size = cfg.get('src_vocab_size', 10000)
@@ -660,7 +660,7 @@ class Transformer(nn.Module):
         # 2. Any checkpoint that has vocab embedded
         for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
             if os.path.isfile(candidate):
-                ckpt = torch.load(candidate, map_location="cpu")
+                ckpt = torch.load(candidate, map_location="cpu", weights_only=False)
                 src_v = _vocab_from_raw(ckpt.get("src_vocab"))
                 tgt_v = _vocab_from_raw(ckpt.get("tgt_vocab"))
                 if src_v is not None and tgt_v is not None:
