@@ -596,9 +596,11 @@ class Transformer(nn.Module):
             if os.path.isfile(vocab_file):
                 with open(vocab_file, "rb") as f:
                     data = pickle.load(f)
-                self.src_vocab = data.get("src_vocab")
-                self.tgt_vocab = data.get("tgt_vocab")
-                if self.src_vocab is not None and self.tgt_vocab is not None:
+                src_v = data.get("src_vocab")
+                tgt_v = data.get("tgt_vocab")
+                if src_v is not None and tgt_v is not None:
+                    self.src_vocab = src_v
+                    self.tgt_vocab = tgt_v
                     return
 
         # 2. Any checkpoint that has vocab embedded
@@ -629,6 +631,8 @@ class Transformer(nn.Module):
         """
         import spacy
         from train import greedy_decode
+
+        self._ensure_vocab()   # load vocab from vocab.pkl / checkpoint if not already set
 
         # spacy.blank("de") uses built-in rules only — no model download, works offline
         spacy_de = spacy.blank("de")
