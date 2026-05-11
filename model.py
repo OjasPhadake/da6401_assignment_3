@@ -464,37 +464,54 @@ class Transformer(nn.Module):
         pad_idx        (int)  : Padding token index (default 1).
     """
 
+    # Google Drive file ID of best_checkpoint.pt — fill this in after uploading
+    _GDRIVE_CHECKPOINT_ID = "<1_Jc9urez6OQO2MgR_oiXKE871kY9bk4l>"
+    _GDRIVE_CHECKPOINT_NAME = "best_checkpoint.pt"
+
     def __init__(
         self,
         src_vocab_size: Optional[int] = None,
         tgt_vocab_size: Optional[int] = None,
-        d_model:   int   = 512,
-        N:         int   = 6,
+        d_model:   int   = 256,   # matches trained config
+        N:         int   = 3,     # matches trained config
         num_heads: int   = 8,
-        d_ff:      int   = 2048,
+        d_ff:      int   = 512,   # matches trained config
         dropout:   float = 0.1,
         checkpoint_path: Optional[str] = None,
         pad_idx:   int   = 1,
     ) -> None:
         super().__init__()
 
-        # If vocab sizes are not given, try to auto-load from a saved checkpoint.
-        # This allows Transformer() to be called with no arguments by the autograder.
+        # If vocab sizes are not given, auto-load from checkpoint (local or Google Drive).
         _ckpt_state = None
         if src_vocab_size is None or tgt_vocab_size is None:
             if checkpoint_path is None:
+                # 1. Look for a local checkpoint
                 for candidate in ("best_checkpoint.pt", "checkpoint.pt"):
                     if os.path.isfile(candidate):
                         checkpoint_path = candidate
                         break
+                # 2. Download from Google Drive if not found locally
+                if checkpoint_path is None and _gdown is not None and \
+                        self._GDRIVE_CHECKPOINT_ID != "<.pth drive id>":
+                    checkpoint_path = self._GDRIVE_CHECKPOINT_NAME
+                    _gdown.download(
+                        id=self._GDRIVE_CHECKPOINT_ID,
+                        output=checkpoint_path,
+                        quiet=False,
+                    )
 
         if checkpoint_path is not None:
             if not os.path.isfile(checkpoint_path):
-                if _gdown is not None:
-                    _gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
+                if _gdown is not None and self._GDRIVE_CHECKPOINT_ID != "<.pth drive id>":
+                    _gdown.download(
+                        id=self._GDRIVE_CHECKPOINT_ID,
+                        output=checkpoint_path,
+                        quiet=False,
+                    )
                 else:
                     raise FileNotFoundError(
-                        f"Checkpoint not found at '{checkpoint_path}' and gdown is not installed."
+                        f"Checkpoint not found at '{checkpoint_path}'."
                     )
             _ckpt_state = torch.load(checkpoint_path, map_location='cpu')
             cfg = _ckpt_state.get('model_config', {})
@@ -687,7 +704,7 @@ class Transformer(nn.Module):
         src_mask = make_src_mask(src, pad_idx)
 
         self.eval()
-        out = greedy_decode(self, src, src_mask, max_len=100,
+        out = greedy_decode(self, src, src_mask, max_len=50,
                             start_symbol=tgt_sos, end_symbol=tgt_eos, device=str(device))
 
         out_tokens = out[0].tolist()
