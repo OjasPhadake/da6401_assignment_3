@@ -590,7 +590,7 @@ class Transformer(nn.Module):
             return
 
         import pickle
-
+        
         # 1. Dedicated vocab file written by save_checkpoint()
         for vocab_file in ("vocab.pkl",):
             if os.path.isfile(vocab_file):
