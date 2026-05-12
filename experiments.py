@@ -385,29 +385,49 @@ def run_exp_2_2():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  2.3  Attention Head Visualisation
+#  2.3  Attention Head Visualisation  (English sentences)
 # ══════════════════════════════════════════════════════════════════════
 
-def _plot_attention_heads(attn: torch.Tensor, tokens: list, title: str):
-    """
-    Create a matplotlib figure with one subplot per attention head.
+# ── Low-level helpers ────────────────────────────────────────────────
 
-    attn  : [1, num_heads, src_len, src_len] (CPU tensor)
-    tokens: list of source token strings (length == src_len)
+def _encode_english(model: Transformer, src: torch.Tensor) -> None:
+    """
+    Run the encoder on an English token-index tensor by using tgt_embed
+    (English vocabulary embeddings) instead of src_embed.  This lets us
+    feed English sentences through the German-trained encoder so attention
+    weights are displayed with readable English token labels.
+
+    After this call every layer's self_attn.last_attn_weights is populated.
+
+    Args:
+        src : [1, seq_len] long tensor of tgt_vocab indices
+    """
+    src_mask = make_src_mask(src, model.pad_idx)
+    model.eval()
+    with torch.no_grad():
+        x = model.tgt_pe(model.tgt_embed(src) * math.sqrt(model.d_model))
+        model.encoder(x, src_mask)
+
+
+def _plot_attention_heads(attn_np: np.ndarray, tokens: list, title: str):
+    """
+    Per-head attention heatmap grid.
+
+    attn_np : [num_heads, L, L]  numpy array
     Returns a matplotlib Figure.
     """
-    attn_np = attn[0].cpu().numpy()   # [heads, src_len, src_len]
     num_heads, L, _ = attn_np.shape
     ncols = 4
     nrows = math.ceil(num_heads / ncols)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3.5))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3.8))
     axes = axes.flatten()
 
     for h in range(num_heads):
         ax = axes[h]
-        im = ax.imshow(attn_np[h], aspect='auto', cmap='Blues', vmin=0.0, vmax=attn_np[h].max())
-        ax.set_title(f"Head {h}", fontsize=9)
+        im = ax.imshow(attn_np[h], aspect='auto', cmap='Blues',
+                       vmin=0.0, vmax=attn_np[h].max())
+        ax.set_title(f"Head {h}", fontsize=9, fontweight='bold')
         ax.set_xticks(range(L))
         ax.set_yticks(range(L))
         ax.set_xticklabels(tokens, fontsize=6, rotation=45, ha='right')
@@ -422,87 +442,302 @@ def _plot_attention_heads(attn: torch.Tensor, tokens: list, title: str):
     return fig
 
 
-def _attention_rollout(model: Transformer, src: torch.Tensor) -> np.ndarray:
+def _attention_rollout(model: Transformer) -> np.ndarray:
     """
-    Compute Attention Rollout across all encoder layers.
-    Returns a [src_len, src_len] numpy array.
-    Reference: Abnar & Zuidema, "Quantifying Attention Flow", 2020.
-    """
-    src_mask = make_src_mask(src, model.pad_idx)
-    model.eval()
-    with torch.no_grad():
-        model.encode(src, src_mask)
+    Attention Rollout across all encoder layers (Abnar & Zuidema, 2020).
+    Assumes _encode_english(model, src) was already called so that
+    last_attn_weights is set on every layer.
 
+    Returns [L, L] numpy array.
+    """
     rollout = None
     for layer in model.encoder.layers:
-        A = layer.self_attn.last_attn_weights[0]   # [heads, L, L]
-        A_mean = A.mean(dim=0).cpu().numpy()        # [L, L]  — average over heads
+        A = layer.self_attn.last_attn_weights[0]   # [H, L, L]
+        A_mean = A.mean(dim=0).cpu().numpy()        # [L, L] — average heads
         I = np.eye(A_mean.shape[0])
-        # Add residual, normalise rows
-        A_hat = 0.5 * A_mean + 0.5 * I
-        A_hat /= A_hat.sum(axis=-1, keepdims=True)
+        A_hat = 0.5 * A_mean + 0.5 * I             # add residual connection
+        A_hat /= A_hat.sum(axis=-1, keepdims=True)  # re-normalise rows
         rollout = A_hat if rollout is None else rollout @ A_hat
-
     return rollout   # [L, L]
 
 
+# ── Analysis helpers (aggregate over multiple sentences) ─────────────
+
+def _plot_head_attention_distance(all_attn: list[np.ndarray]) -> plt.Figure:
+    """
+    Bar chart: mean weighted attention distance per head.
+
+    A head with low distance attends locally (next / previous token);
+    a head with high distance captures long-range dependencies.
+
+    all_attn : list of [H, L, L] arrays (one per sentence)
+    """
+    num_heads = all_attn[0].shape[0]
+    distances = np.zeros(num_heads)
+    count = 0
+
+    for attn in all_attn:   # [H, L, L]
+        H, L, _ = attn.shape
+        positions = np.arange(L)
+        for h in range(H):
+            for i in range(L):
+                # weighted average of |i - j| under the attention distribution
+                distances[h] += float(np.dot(attn[h, i], np.abs(positions - i)))
+        count += L   # normalise by number of query positions across sentences
+
+    distances /= count
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    colors = plt.cm.viridis(np.linspace(0.2, 0.9, num_heads))
+    bars = ax.bar(range(num_heads), distances, color=colors, edgecolor='black', linewidth=0.5)
+    ax.bar_label(bars, fmt='%.2f', fontsize=7, padding=2)
+    ax.set_xlabel("Head index", fontsize=11)
+    ax.set_ylabel("Mean attention distance (tokens)", fontsize=11)
+    ax.set_title("Head Specialisation: Average Attention Distance\n"
+                 "Low → local / syntactic  |  High → long-range / semantic", fontsize=11)
+    ax.set_xticks(range(num_heads))
+    ax.set_xticklabels([f"H{h}" for h in range(num_heads)], fontsize=9)
+    plt.tight_layout()
+    return fig
+
+
+def _plot_head_entropy(all_attn: list[np.ndarray]) -> plt.Figure:
+    """
+    Bar chart: mean Shannon entropy of each head's attention distribution.
+
+    Low entropy  → peaked / highly specialised (attends to one token).
+    High entropy → diffuse / distributed attention (uniform = log L nats).
+    """
+    num_heads = all_attn[0].shape[0]
+    entropies = np.zeros(num_heads)
+    count = 0
+
+    for attn in all_attn:   # [H, L, L]
+        w = np.clip(attn, 1e-9, None)
+        # [H, L] per-query entropy; average over queries and sentences
+        ent = -(w * np.log(w)).sum(axis=-1)   # [H, L]
+        entropies += ent.mean(axis=-1)         # [H]
+        count += 1
+
+    entropies /= count
+    max_ent = math.log(all_attn[0].shape[-1])  # entropy of uniform over L tokens
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    colors = plt.cm.plasma(entropies / max_ent)
+    bars = ax.bar(range(num_heads), entropies, color=colors, edgecolor='black', linewidth=0.5)
+    ax.bar_label(bars, fmt='%.2f', fontsize=7, padding=2)
+    ax.axhline(max_ent, color='red', linestyle='--', linewidth=1.2,
+               label=f'Uniform (max) = {max_ent:.2f} nats')
+    ax.set_xlabel("Head index", fontsize=11)
+    ax.set_ylabel("Mean entropy (nats)", fontsize=11)
+    ax.set_title("Head Specialisation: Attention Entropy per Head\n"
+                 "Low → specialised  |  High → diffuse (possible redundancy)", fontsize=11)
+    ax.set_xticks(range(num_heads))
+    ax.set_xticklabels([f"H{h}" for h in range(num_heads)], fontsize=9)
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    return fig
+
+
+def _plot_head_cosine_similarity(all_attn: list[np.ndarray]) -> plt.Figure:
+    """
+    Heatmap of pairwise cosine similarity between heads.
+
+    For each sentence, flatten each head's attention matrix to a vector and
+    compute the cosine similarity between every pair of heads.  Average over
+    all sentences.
+
+    Values near +1 → heads attend to the same positions → REDUNDANT.
+    Values near  0 → heads are diverse → SPECIALISED.
+    """
+    num_heads = all_attn[0].shape[0]
+    sim_sum = np.zeros((num_heads, num_heads))
+
+    for attn in all_attn:   # [H, L, L]
+        H = attn.shape[0]
+        vecs = attn.reshape(H, -1).astype(np.float64)          # [H, L²]
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
+        vecs_n = vecs / norms
+        sim_sum += vecs_n @ vecs_n.T
+
+    sim = sim_sum / len(all_attn)
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(sim, cmap='RdYlGn', vmin=0.0, vmax=1.0)
+    plt.colorbar(im, ax=ax, label='Cosine similarity')
+
+    for i in range(num_heads):
+        for j in range(num_heads):
+            ax.text(j, i, f"{sim[i, j]:.2f}",
+                    ha='center', va='center', fontsize=7,
+                    color='black' if sim[i, j] < 0.8 else 'white')
+
+    ax.set_xticks(range(num_heads))
+    ax.set_yticks(range(num_heads))
+    ax.set_xticklabels([f"H{h}" for h in range(num_heads)], fontsize=8)
+    ax.set_yticklabels([f"H{h}" for h in range(num_heads)], fontsize=8)
+    ax.set_title("Inter-Head Cosine Similarity\n"
+                 "Green (≈1) → redundant heads  |  Red (≈0) → diverse / specialised", fontsize=10)
+    plt.tight_layout()
+    return fig
+
+
+def _plot_head_max_position(all_attn: list[np.ndarray]) -> plt.Figure:
+    """
+    For every query position i in every sentence, record which key position j
+    each head attends to most (argmax).  Bin into three categories:
+      'prev'  : j = i - 1  (attends to previous token)
+      'next'  : j = i + 1  (attends to next token)
+      'self'  : j = i
+      'other' : everything else (long-range)
+
+    Shows as a stacked bar chart — useful for spotting heads that behave
+    like local-context heads vs. global-context heads.
+    """
+    num_heads = all_attn[0].shape[0]
+    counts = {k: np.zeros(num_heads) for k in ('self', 'prev', 'next', 'other')}
+    total = np.zeros(num_heads)
+
+    for attn in all_attn:   # [H, L, L]
+        H, L, _ = attn.shape
+        for h in range(H):
+            for i in range(L):
+                j = int(np.argmax(attn[h, i]))
+                if j == i:
+                    counts['self'][h] += 1
+                elif j == i - 1:
+                    counts['prev'][h] += 1
+                elif j == i + 1:
+                    counts['next'][h] += 1
+                else:
+                    counts['other'][h] += 1
+                total[h] += 1
+
+    # Normalise to fractions
+    fracs = {k: counts[k] / np.maximum(total, 1) for k in counts}
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    x = np.arange(num_heads)
+    palette = {'self': '#4C72B0', 'prev': '#DD8452', 'next': '#55A868', 'other': '#C44E52'}
+    bottom = np.zeros(num_heads)
+    for label, color in palette.items():
+        ax.bar(x, fracs[label], bottom=bottom, label=label, color=color,
+               edgecolor='white', linewidth=0.5)
+        bottom += fracs[label]
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"H{h}" for h in range(num_heads)], fontsize=9)
+    ax.set_ylabel("Fraction of queries", fontsize=11)
+    ax.set_xlabel("Head index", fontsize=11)
+    ax.set_title("Where Does Each Head Attend Most?\n"
+                 "Heads dominated by 'next'/'prev' are local-syntactic; "
+                 "'other' indicates long-range", fontsize=10)
+    ax.legend(loc='upper right', fontsize=9)
+    plt.tight_layout()
+    return fig
+
+
+# ── Main experiment ───────────────────────────────────────────────────
+
 def run_exp_2_3():
     print("\n" + "="*60)
-    print("Experiment 2.3 — Attention Head Visualisation")
+    print("Experiment 2.3 — Attention Head Visualisation (English sentences)")
     print("="*60)
 
-    # Load the trained model (no-arg construction → downloads checkpoint)
+    # ── Load model ───────────────────────────────────────────────────
     print("Loading best_checkpoint.pt …")
     model = Transformer().to(DEVICE)
     model.eval()
     model._ensure_vocab()
 
     import spacy
-    spacy_de = spacy.blank("de")
+    spacy_en = spacy.blank("en")
 
-    # A few diverse test sentences
+    # Diverse English sentences — different lengths, structures, clauses.
+    # We use tgt_vocab (English) to tokenise and tgt_embed for embeddings,
+    # then run through the encoder to extract attention weights.
     sentences = [
-        "ein mann sitzt auf einem stuhl .",
-        "zwei kinder spielen auf dem spielplatz .",
-        "eine frau läuft durch den park und lächelt .",
+        "a man is sitting on a chair .",
+        "two children play in the park .",
+        "the dog runs quickly across the field .",
+        "a woman walks through the market carrying a large basket .",
+        "the tall buildings reflect the bright morning sunlight .",
+        "he said that he would come back later .",
     ]
 
     wandb.init(project=WANDB_PROJECT, name="attention_viz", group="2.3-attention")
 
+    all_attn_np   = []   # [H, L, L] per sentence — for aggregate plots
+    all_tokens    = []   # token strings per sentence
+
     for sent_idx, sentence in enumerate(sentences):
-        tokens = [tok.text.lower() for tok in spacy_de.tokenizer(sentence)]
-        sos, eos = model.src_vocab.stoi.get('<sos>', 2), model.src_vocab.stoi.get('<eos>', 3)
-        ids = [sos] + model.src_vocab.lookup_indices(tokens) + [eos]
+        # Tokenise with English tokeniser → look up in English (tgt) vocab
+        tokens = [tok.text.lower() for tok in spacy_en.tokenizer(sentence)]
+        sos = model.tgt_vocab.stoi.get('<sos>', 2)
+        eos = model.tgt_vocab.stoi.get('<eos>', 3)
+        ids  = [sos] + model.tgt_vocab.lookup_indices(tokens) + [eos]
         display_tokens = ['<sos>'] + tokens + ['<eos>']
+        all_tokens.append(display_tokens)
 
-        src = torch.tensor(ids, dtype=torch.long, device=DEVICE).unsqueeze(0)  # [1, L]
+        src = torch.tensor(ids, dtype=torch.long, device=DEVICE).unsqueeze(0)
 
-        # — Per-head heatmap (last encoder layer) —
-        attn = model.get_encoder_attention(src)   # [1, heads, L, L]
+        # ── Encode using English embeddings (tgt_embed → encoder) ──
+        _encode_english(model, src)
+
+        # Last-layer attention weights  [1, H, L, L]
+        attn_tensor = model.encoder.layers[-1].self_attn.last_attn_weights
+        attn_np     = attn_tensor[0].cpu().numpy()   # [H, L, L]
+        all_attn_np.append(attn_np)
+
+        # ── Plot 1: Per-head heatmaps ───────────────────────────────
         fig_heads = _plot_attention_heads(
-            attn, display_tokens,
-            title=f"Encoder Last-Layer Attention: \"{sentence}\""
+            attn_np, display_tokens,
+            title=f'Encoder Last-Layer Attention  |  "{sentence}"',
         )
         wandb.log({f"attn_heads/sentence_{sent_idx}": wandb.Image(fig_heads)})
         plt.close(fig_heads)
 
-        # — Attention Rollout —
-        rollout = _attention_rollout(model, src)   # [L, L]
+        # ── Plot 2: Attention Rollout ───────────────────────────────
+        rollout = _attention_rollout(model)   # [L, L]
         fig_roll, ax = plt.subplots(figsize=(6, 5))
         im = ax.imshow(rollout, aspect='auto', cmap='Purples')
         ax.set_xticks(range(len(display_tokens)))
         ax.set_yticks(range(len(display_tokens)))
         ax.set_xticklabels(display_tokens, fontsize=7, rotation=45, ha='right')
         ax.set_yticklabels(display_tokens, fontsize=7)
-        plt.colorbar(im, ax=ax)
-        ax.set_title(f"Attention Rollout: \"{sentence}\"", fontsize=9)
+        plt.colorbar(im, ax=ax, label='Rollout weight')
+        ax.set_title(f'Attention Rollout  |  "{sentence}"', fontsize=9)
         plt.tight_layout()
         wandb.log({f"attn_rollout/sentence_{sent_idx}": wandb.Image(fig_roll)})
         plt.close(fig_roll)
 
-        print(f"  Logged attention maps for: {sentence}")
+        print(f"  [{sent_idx+1}/{len(sentences)}] logged: {sentence}")
+
+    # ── Aggregate plots for head-specialisation / redundancy analysis ─
+    print("  Generating aggregate head-analysis plots …")
+
+    # Plot 3: Attention distance bar chart
+    fig_dist = _plot_head_attention_distance(all_attn_np)
+    wandb.log({"head_analysis/attention_distance": wandb.Image(fig_dist)})
+    plt.close(fig_dist)
+
+    # Plot 4: Attention entropy bar chart
+    fig_ent = _plot_head_entropy(all_attn_np)
+    wandb.log({"head_analysis/entropy_per_head": wandb.Image(fig_ent)})
+    plt.close(fig_ent)
+
+    # Plot 5: Inter-head cosine similarity matrix (head redundancy)
+    fig_sim = _plot_head_cosine_similarity(all_attn_np)
+    wandb.log({"head_analysis/inter_head_cosine_similarity": wandb.Image(fig_sim)})
+    plt.close(fig_sim)
+
+    # Plot 6: Stacked bar — what position does each head argmax-attend to?
+    fig_pos = _plot_head_max_position(all_attn_np)
+    wandb.log({"head_analysis/max_attended_position": wandb.Image(fig_pos)})
+    plt.close(fig_pos)
 
     wandb.finish()
+    print("  Done — all plots logged to W&B.")
 
 
 # ══════════════════════════════════════════════════════════════════════
