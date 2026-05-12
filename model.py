@@ -183,7 +183,8 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k       = d_model // num_heads
         self.use_scale = use_scale
-        self.last_attn_weights: Optional[torch.Tensor] = None  # saved after each forward for visualization
+        self.last_attn_weights: Optional[torch.Tensor] = None  # post-softmax [B, H, Lq, Lk]
+        self.last_raw_scores:   Optional[torch.Tensor] = None  # pre-scale QKᵀ [B, H, Lq, Lk]
 
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
@@ -220,6 +221,7 @@ class MultiHeadAttention(nn.Module):
         K = project_and_split(self.W_k, key)
         V = project_and_split(self.W_v, value)
 
+        self.last_raw_scores = torch.matmul(Q, K.transpose(-2, -1)).detach()  # QKᵀ before scaling
         attn_out, attn_w = scaled_dot_product_attention(Q, K, V, mask, use_scale=self.use_scale)
         self.last_attn_weights = attn_w.detach()  # [batch, heads, seq_q, seq_k]
 

@@ -238,49 +238,150 @@ def run_exp_2_1():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  2.2  Scaling Factor 1/sqrt(d_k) Ablation
+#  2.2  Scaling Factor 1/sqrt(d_k) Ablation — five panels
 # ══════════════════════════════════════════════════════════════════════
+
+def _run_2_2_single(
+    run_name: str,
+    group: str,
+    use_scale: bool,
+    cfg: dict,
+    src_vocab,
+    tgt_vocab,
+    train_loader,
+    val_loader,
+    num_epochs: int = 10,
+    grad_log_limit: int = 1000,
+    warmup_steps: int = None,
+    fixed_lr: float = None,
+):
+    """
+    Train one variant and log all five panels:
+      P1 grad_norm/enc{i}_{Wq|Wk}   — W_q / W_k gradient norms
+      P2 attn_logit/{mean|std|max}   — raw QKᵀ statistics
+      P3 attn_entropy                — Shannon entropy of attention distribution
+      (P4/P5 distinguished by cfg and warmup_steps at the call-site)
+    Per-step metrics are logged for the first `grad_log_limit` steps only.
+    """
+    warmup_steps = warmup_steps if warmup_steps is not None else cfg['warmup_steps']
+
+    wandb.init(
+        project=WANDB_PROJECT, name=run_name, group=group,
+        config={**cfg, "use_scale": use_scale, "num_epochs": num_epochs,
+                "warmup_steps": warmup_steps, "fixed_lr": fixed_lr,
+                "d_k": cfg['d_model'] // cfg['num_heads']},
+    )
+
+    model     = make_model(src_vocab, tgt_vocab, cfg, use_scale=use_scale)
+    lr        = fixed_lr if fixed_lr is not None else 1.0
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.98), eps=1e-9)
+    scheduler = (None if fixed_lr is not None else
+                 NoamScheduler(optimizer, d_model=cfg['d_model'], warmup_steps=warmup_steps))
+    loss_fn   = LabelSmoothingLoss(len(tgt_vocab), PAD_IDX, smoothing=cfg['label_smooth'])
+
+    pad_idx       = model.pad_idx
+    last_enc_attn = model.encoder.layers[-1].self_attn   # reference for attention metrics
+
+    # All W_q / W_k params across encoder layers (Panel 1)
+    grad_params = []
+    for i, layer in enumerate(model.encoder.layers):
+        grad_params.append((f"enc{i}_Wq", layer.self_attn.W_q.weight))
+        grad_params.append((f"enc{i}_Wk", layer.self_attn.W_k.weight))
+
+    global_step = 0
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = total_tokens = 0
+
+        for src, tgt in tqdm(train_loader, leave=False, desc=run_name):
+            src, tgt = src.to(DEVICE), tgt.to(DEVICE)
+            tgt_in, tgt_tgt = tgt[:, :-1], tgt[:, 1:]
+
+            logits = model(src, tgt_in,
+                           make_src_mask(src, pad_idx),
+                           make_tgt_mask(tgt_in, pad_idx))
+            flat_logits  = logits.contiguous().view(-1, logits.size(-1))
+            flat_targets = tgt_tgt.contiguous().view(-1)
+            loss = loss_fn(flat_logits, flat_targets)
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            # ── Per-step diagnostics (first grad_log_limit steps) ──────
+            if global_step < grad_log_limit:
+                log = {"step": global_step}
+
+                # Panel 1 — Gradient norms of W_q / W_k
+                for name, param in grad_params:
+                    if param.grad is not None:
+                        log[f"grad_norm/{name}"] = param.grad.norm().item()
+
+                # Panel 2 — Raw QKᵀ logit magnitude (before any scaling)
+                raw = last_enc_attn.last_raw_scores   # [B, H, Lq, Lk]
+                if raw is not None:
+                    raw_f = raw.float()
+                    log["attn_logit/mean"]    = raw_f.mean().item()
+                    log["attn_logit/std"]     = raw_f.std().item()
+                    log["attn_logit/max_abs"] = raw_f.abs().max().item()
+
+                # Panel 3 — Shannon entropy of attention weights
+                w = last_enc_attn.last_attn_weights   # [B, H, Lq, Lk]
+                if w is not None:
+                    w_f = w.float().clamp(min=1e-9)
+                    entropy = -(w_f * w_f.log()).sum(-1).mean().item()
+                    log["attn_entropy"] = entropy
+
+                wandb.log(log)
+
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            n_tok         = (tgt_tgt != pad_idx).sum().item()
+            total_loss   += loss.item() * n_tok
+            total_tokens += n_tok
+            global_step  += 1
+
+        val_loss  = eval_one_epoch(model, val_loader, loss_fn)
+        avg_loss  = total_loss / max(total_tokens, 1)
+        print(f"  [{run_name}] ep {epoch:02d} | train={avg_loss:.4f} | val={val_loss:.4f}")
+        wandb.log({"train_loss": avg_loss, "val_loss": val_loss, "epoch": epoch})
+
+    wandb.finish()
+
 
 def run_exp_2_2():
     print("\n" + "="*60)
-    print("Experiment 2.2 — Scaling Factor 1/sqrt(d_k)")
+    print("Experiment 2.2 — Scaling Factor 1/sqrt(d_k)  (5 panels)")
     print("="*60)
-    NUM_EPOCHS    = 10
-    GRAD_LOG_STEPS = 1000  # log grad norms only during the first 1000 steps
 
     train_loader, val_loader, _, src_vocab, tgt_vocab = load_data(BASE_CFG['batch_size'])
 
-    for use_scale, run_name in [(True, "with_scale"), (False, "no_scale")]:
-        wandb.init(
-            project=WANDB_PROJECT, name=run_name, group="2.2-scaling",
-            config={**BASE_CFG, "use_scale": use_scale, "num_epochs": NUM_EPOCHS,
-                    "grad_log_steps": GRAD_LOG_STEPS},
-        )
+    # ── Panels 1-3: base architecture, with vs without scale ──────────
+    # Panels 1-3 are logged by both runs; W&B overlays them automatically.
+    for use_scale, name in [(True, "with_scale"), (False, "no_scale")]:
+        _run_2_2_single(name, "2.2-main", use_scale, BASE_CFG,
+                        src_vocab, tgt_vocab, train_loader, val_loader,
+                        num_epochs=10, grad_log_limit=1000)
 
-        model     = make_model(src_vocab, tgt_vocab, BASE_CFG, use_scale=use_scale)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
-        scheduler = NoamScheduler(optimizer, d_model=BASE_CFG['d_model'],
-                                  warmup_steps=BASE_CFG['warmup_steps'])
-        loss_fn   = LabelSmoothingLoss(len(tgt_vocab), PAD_IDX, smoothing=BASE_CFG['label_smooth'])
+    # ── Panel 4: Large d_k stress test (no_scale only) ────────────────
+    # Keep d_model=256 but reduce num_heads → d_k grows: 32→64→128.
+    # Without 1/√d_k the variance of QKᵀ scales with d_k; instability
+    # worsens dramatically as d_k increases.
+    for num_heads, label in [(4, "no_scale_dk64"), (2, "no_scale_dk128")]:
+        cfg_stress = {**BASE_CFG, "num_heads": num_heads}
+        _run_2_2_single(label, "2.2-stress-dk", False, cfg_stress,
+                        src_vocab, tgt_vocab, train_loader, val_loader,
+                        num_epochs=5, grad_log_limit=1000)
 
-        # Collect all encoder Q and K weight params for grad-norm tracking
-        grad_watch = []
-        for i, layer in enumerate(model.encoder.layers):
-            grad_watch.append((f"enc{i}_Wq", layer.self_attn.W_q.weight))
-            grad_watch.append((f"enc{i}_Wk", layer.self_attn.W_k.weight))
-
-        global_step = 0
-        for epoch in range(NUM_EPOCHS):
-            train_loss, global_step = train_one_epoch(
-                model, train_loader, loss_fn, optimizer, scheduler,
-                grad_watch=grad_watch, grad_log_limit=GRAD_LOG_STEPS,
-                global_step=global_step,
-            )
-            val_loss = eval_one_epoch(model, val_loader, loss_fn)
-            print(f"  [{run_name}] ep {epoch:02d} | train={train_loss:.4f} | val={val_loss:.4f}")
-            wandb.log({"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch})
-
-        wandb.finish()
+    # ── Panel 5: LR sensitivity (no_scale, short vs normal warmup) ────
+    # Short warmup ramps up LR faster → LR peak is hit in first 500 steps
+    # instead of 4000, magnifying gradient instability in the unscaled model.
+    for warmup, label in [(500, "no_scale_warmup500"), (4000, "no_scale_warmup4000")]:
+        _run_2_2_single(label, "2.2-lr-sensitivity", False, BASE_CFG,
+                        src_vocab, tgt_vocab, train_loader, val_loader,
+                        num_epochs=5, grad_log_limit=1000, warmup_steps=warmup)
 
 
 # ══════════════════════════════════════════════════════════════════════
