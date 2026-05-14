@@ -17,8 +17,7 @@ da6401_assignment_3/
 ├── dataset.py        # Multi30k dataset loading, spaCy tokenization, vocab building
 ├── lr_scheduler.py   # Noam learning rate schedule
 ├── experiments.py    # W&B experiments 2.1–2.5
-├── requirements.txt
-└── ex.md             # Detailed implementation notes and debugging journal
+└── requirements.txt
 ```
 
 ## Model Architecture
